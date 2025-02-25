@@ -1,0 +1,2 @@
+#V2
+::use_contract_default sbtc-registry\n(contract-call? .sbtc-registry set-bitcoin-wallet 0x000000000000000000000000000000000000000000000000000000000000000033)

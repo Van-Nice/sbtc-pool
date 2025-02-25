@@ -1,6 +1,7 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Copy, LogOut, RefreshCw, Check } from "lucide-react";
 import toml from "@iarna/toml";
 import * as bip39 from "bip39";
@@ -16,8 +17,11 @@ import {
   makeContractCall,
   uintCV,
   bufferCV,
+  ClarityValue,
+  BufferCV,
 } from "@stacks/transactions";
-import { STACKS_MAINNET, STACKS_TESTNET } from "@stacks/network";
+import { STACKS_MAINNET, STACKS_TESTNET, StacksNetwork } from "@stacks/network";
+import { verifyContractDeployment } from "../utils/contracts";
 
 // Use tiny-secp256k1 for browser compatibility
 import * as tinySecp from "@bitcoin-js/tiny-secp256k1-asmjs";
@@ -41,10 +45,10 @@ const btcNetwork = bitcoin.networks.regtest; // Devnet uses regtest
 
 // Create a custom devnet network configuration
 const devnetNetwork: StacksNetwork = {
-  version: "testnet", // Use testnet version for devnet
-  chainId: 2147483648, // Default chainId for testnet/devnet
-  coreApiUrl: "http://localhost:3999",
-  bnsLookupUrl: "http://localhost:3999",
+  version: "testnet",
+  chainId: 2147483648,
+  coreApiUrl: "http://localhost:20443",
+  bnsLookupUrl: "http://localhost:20443",
   broadcastEndpoint: "/v2/transactions",
   transferFeeEstimateEndpoint: "/v2/fees/transfer",
   accountEndpoint: "/v2/accounts",
@@ -71,20 +75,21 @@ const SBTC_CONTRACTS = {
 
 // Update bridge configuration
 const BRIDGE_CONFIG = {
-  minDepositAmount: 0.01, // Minimum BTC amount required for bridging
-  confirmationsRequired: 6, // Number of confirmations needed
-  network: STACKS_TESTNET, // Use testnet for development
+  minDepositAmount: 0.01,
+  confirmationsRequired: 6,
+  network: devnetNetwork,
   fees: {
-    btcTxFee: 80000, // 80k sats max for UTXO consolidation
+    btcTxFee: 80000,
   },
 };
 
 type WalletInfo = {
   btcAddress: string;
   stacksAddress: string;
+  stxPrivateKey: string;
   btcBalance?: number;
   stxBalance?: number;
-  sBTCBalance?: number; // Add sBTC balance
+  sBTCBalance?: number;
 };
 
 // Add bridging state types
@@ -101,6 +106,10 @@ type UserInfo = {
   sBTCShare: number;
 };
 
+const network = new StacksNetwork({
+  url: "http://localhost:3999",
+});
+
 export default function UserProfilePage() {
   const [isConnected, setIsConnected] = useState(false);
   const [walletInfo, setWalletInfo] = useState<WalletInfo | null>(null);
@@ -115,13 +124,10 @@ export default function UserProfilePage() {
   // Function to fetch BTC balance from local devnet
   const fetchBTCBalance = async (address: string) => {
     try {
-      // Using Bitcoin Core RPC API with devnet credentials
       const response = await fetch("/api/btc", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Default devnet credentials (base64 encoded devnet:devnet)
-          Authorization: "Basic ZGV2bmV0OmRldm5ldA==",
         },
         body: JSON.stringify({
           jsonrpc: "1.0",
@@ -160,8 +166,7 @@ export default function UserProfilePage() {
   // Function to fetch STX balance from local devnet
   const fetchSTXBalance = async (address: string) => {
     try {
-      // Using Stacks node API directly
-      const response = await fetch(`/api/stx/v2/accounts/${address}`);
+      const response = await fetch(`/api/stx/accounts/${address}`);
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
@@ -265,20 +270,35 @@ export default function UserProfilePage() {
   // Function to get current bridge address from registry
   const getBridgeAddress = async () => {
     try {
-      const response = await fetchCallReadOnlyFunction({
-        contractAddress: SBTC_CONTRACTS.registry.address,
-        contractName: SBTC_CONTRACTS.registry.name,
-        functionName: "get-bitcoin-bridge-address",
-        functionArgs: [],
-        network: BRIDGE_CONFIG.network,
-        senderAddress: SBTC_CONTRACTS.registry.address,
+      const response = await fetch("/api/stx/v2/contracts/call-read", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sender: SBTC_CONTRACTS.registry.address,
+          arguments: [],
+          contract_address: SBTC_CONTRACTS.registry.address,
+          contract_name: SBTC_CONTRACTS.registry.name,
+          function_name: "get-bitcoin-wallet",
+        }),
       });
 
-      // Bridge address is returned as a buffer
-      if (response && response.value) {
-        return response.value.buffer.toString("hex");
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Bridge contract call failed:", errorText);
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
-      throw new Error("No bridge address returned");
+
+      const data = await response.json();
+      console.log("Bridge response data:", data);
+
+      // Check if the response has the expected structure
+      if (data && data.result && data.result.value) {
+        return data.result.value;
+      }
+
+      throw new Error("No bridge address returned or incorrect type");
     } catch (error) {
       console.error("Error fetching bridge address:", error);
       throw error;
@@ -303,7 +323,7 @@ export default function UserProfilePage() {
         throw new Error("Amount too small to cover fees");
       }
 
-      // Create deposit request
+      // Create deposit request with proper signing
       const tx = await makeContractCall({
         contractAddress: SBTC_CONTRACTS.bridge.address,
         contractName: SBTC_CONTRACTS.bridge.name,
@@ -314,10 +334,14 @@ export default function UserProfilePage() {
           standardPrincipalCV(walletInfo.stacksAddress),
         ],
         network: BRIDGE_CONFIG.network,
+        senderKey: walletInfo.stxPrivateKey,
       });
 
-      // Broadcast the transaction
-      const broadcastResponse = await broadcastTransaction(tx);
+      // Broadcast with proper type
+      const broadcastResponse = await broadcastTransaction({
+        transaction: tx,
+        network: BRIDGE_CONFIG.network,
+      });
 
       if ("error" in broadcastResponse) {
         throw new Error(`Failed to broadcast: ${broadcastResponse.error}`);
@@ -350,13 +374,38 @@ export default function UserProfilePage() {
   };
 
   // Function to monitor bridging transaction
-  const monitorBridgingTransaction = async (txId: string) => {
+  const monitorBridgingTransaction = async (btcTxId: string) => {
     const checkConfirmations = async () => {
       try {
-        const response = await fetch(`/api/btc/tx/${txId}`);
-        const data = await response.json();
+        // Check BTC transaction
+        const btcResponse = await fetch("/api/btc", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "1.0",
+            id: "check-tx",
+            method: "gettransaction",
+            params: [btcTxId],
+          }),
+        });
 
-        const confirmations = data.confirmations || 0;
+        const btcData = await btcResponse.json();
+        const confirmations = btcData.result.confirmations || 0;
+
+        // Check sBTC bridge status
+        const bridgeStatus = await fetchCallReadOnlyFunction({
+          contractAddress: SBTC_CONTRACTS.bridge.address,
+          contractName: SBTC_CONTRACTS.bridge.name,
+          functionName: "get-deposit",
+          functionArgs: [bufferCV(Buffer.from(btcTxId, "hex"))],
+          network: BRIDGE_CONFIG.network,
+          senderAddress: walletInfo!.stacksAddress,
+        });
+
+        console.log("Bridge status:", bridgeStatus);
+
         setBridgingState((prev) => ({
           ...prev,
           confirmations,
@@ -369,7 +418,7 @@ export default function UserProfilePage() {
         if (confirmations < BRIDGE_CONFIG.confirmationsRequired) {
           setTimeout(checkConfirmations, 60000); // Check every minute
         } else {
-          // Update balances after bridging is complete
+          // Update sBTC balance after bridging is complete
           if (walletInfo) {
             const newSBTCBalance = await fetchSBTCBalance(
               walletInfo.stacksAddress
@@ -453,6 +502,7 @@ export default function UserProfilePage() {
         setWalletInfo({
           btcAddress,
           stacksAddress,
+          stxPrivateKey,
           btcBalance,
           stxBalance,
         });
@@ -504,13 +554,116 @@ export default function UserProfilePage() {
     alert("Settings updated!");
   };
 
+  // Add this function after the fetchBTCBalance function
+  const sendBTCToAddress = async (
+    recipientAddress: string,
+    amount: number,
+    senderAddress: string
+  ) => {
+    try {
+      // First, create a raw transaction
+      const createTxResponse = await fetch("/api/btc", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "1.0",
+          id: "create-tx",
+          method: "createrawtransaction",
+          params: [
+            [], // No inputs - Bitcoin Core will select them
+            { [recipientAddress]: amount },
+          ],
+        }),
+      });
+
+      const createTxData = await createTxResponse.json();
+      if (createTxData.error) {
+        throw new Error(
+          `Failed to create transaction: ${createTxData.error.message}`
+        );
+      }
+
+      // Fund the raw transaction
+      const fundTxResponse = await fetch("/api/btc", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "1.0",
+          id: "fund-tx",
+          method: "fundrawtransaction",
+          params: [createTxData.result],
+        }),
+      });
+
+      const fundTxData = await fundTxResponse.json();
+      if (fundTxData.error) {
+        throw new Error(
+          `Failed to fund transaction: ${fundTxData.error.message}`
+        );
+      }
+
+      // Sign the funded transaction
+      const signTxResponse = await fetch("/api/btc", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "1.0",
+          id: "sign-tx",
+          method: "signrawtransactionwithwallet",
+          params: [fundTxData.result.hex],
+        }),
+      });
+
+      const signTxData = await signTxResponse.json();
+      if (signTxData.error || !signTxData.result.complete) {
+        throw new Error(
+          `Failed to sign transaction: ${
+            signTxData.error?.message || "Incomplete signature"
+          }`
+        );
+      }
+
+      // Send the signed transaction
+      const sendTxResponse = await fetch("/api/btc", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "1.0",
+          id: "send-tx",
+          method: "sendrawtransaction",
+          params: [signTxData.result.hex],
+        }),
+      });
+
+      const sendTxData = await sendTxResponse.json();
+      if (sendTxData.error) {
+        throw new Error(
+          `Failed to broadcast transaction: ${sendTxData.error.message}`
+        );
+      }
+
+      return sendTxData.result; // Returns the transaction ID
+    } catch (error) {
+      console.error("Error sending BTC:", error);
+      throw error;
+    }
+  };
+
   // Update BridgingInterface component
   const BridgingInterface = () => {
     const [depositAmount, setDepositAmount] = useState<string>("");
     const [bridgeAddress, setBridgeAddress] = useState<string>("");
 
     // Fetch bridge address on component mount
-    React.useEffect(() => {
+    useEffect(() => {
       getBridgeAddress()
         .then((address) => setBridgeAddress(address))
         .catch(console.error);
@@ -526,10 +679,82 @@ export default function UserProfilePage() {
       }
 
       try {
-        await initiateDeposit(amount);
+        setBridgingState({ status: "pending" });
+
+        // 1. Get current bridge address
+        const bridgeAddress = await getBridgeAddress();
+        console.log("Bridge address for deposit:", bridgeAddress);
+
+        // 2. Send BTC to bridge address
+        const satsAmount = Math.floor(amount * 100000000); // Convert BTC to sats
+        console.log("Sending", satsAmount, "sats to bridge");
+
+        const btcTxId = await sendBTCToAddress(
+          bridgeAddress,
+          amount,
+          walletInfo!.btcAddress
+        );
+        console.log("BTC transaction ID:", btcTxId);
+
+        // 3. Initiate the deposit on Stacks
+        const tx = await makeContractCall({
+          contractAddress: SBTC_CONTRACTS.bridge.address,
+          contractName: SBTC_CONTRACTS.bridge.name,
+          functionName: "initiate-deposit",
+          functionArgs: [
+            bufferCV(Buffer.from(btcTxId, "hex")), // BTC transaction ID
+            uintCV(satsAmount), // Amount in sats
+            standardPrincipalCV(walletInfo!.stacksAddress), // Recipient
+          ],
+          network: BRIDGE_CONFIG.network,
+          senderKey: walletInfo!.stxPrivateKey,
+        });
+
+        console.log("Initiating deposit on Stacks...");
+        const broadcastResponse = await broadcastTransaction({
+          transaction: tx,
+          network: BRIDGE_CONFIG.network,
+        });
+
+        if ("error" in broadcastResponse) {
+          throw new Error(`Failed to broadcast: ${broadcastResponse.error}`);
+        }
+
+        console.log("Deposit initiated:", broadcastResponse);
+
+        // 4. Update UI state
+        setBridgingState({
+          status: "confirming",
+          txId: btcTxId,
+          confirmations: 0,
+        });
+
+        // 5. Start monitoring both BTC and Stacks transactions
+        monitorBridgingTransaction(btcTxId);
+
+        // 6. Update balances
+        if (walletInfo) {
+          const newBTCBalance = await fetchBTCBalance(walletInfo.btcAddress);
+          setWalletInfo((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  btcBalance: newBTCBalance,
+                }
+              : null
+          );
+        }
       } catch (error) {
+        console.error("Error handling deposit:", error);
+        setBridgingState({
+          status: "failed",
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to process deposit",
+        });
         setFileError(
-          error instanceof Error ? error.message : "Failed to initiate deposit"
+          error instanceof Error ? error.message : "Failed to process deposit"
         );
       }
     };
@@ -574,7 +799,10 @@ export default function UserProfilePage() {
                 onChange={(e) => setDepositAmount(e.target.value)}
                 min={BRIDGE_CONFIG.minDepositAmount}
                 step="0.001"
+                placeholder="Enter amount in BTC"
+                aria-label="Deposit Amount (BTC)"
                 className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                disabled={bridgingState.status !== "idle"}
               />
             </div>
 
@@ -585,41 +813,30 @@ export default function UserProfilePage() {
             >
               {bridgingState.status === "idle"
                 ? "Initiate Deposit"
-                : "Processing..."}
+                : bridgingState.status === "pending"
+                ? "Processing..."
+                : bridgingState.status === "confirming"
+                ? `Confirming (${bridgingState.confirmations}/${BRIDGE_CONFIG.confirmationsRequired})`
+                : bridgingState.status === "completed"
+                ? "Completed"
+                : "Failed"}
             </button>
 
             {bridgingState.status !== "idle" && (
               <div className="mt-4">
-                <div className="text-sm font-medium text-gray-900">
-                  Bridging Status: {bridgingState.status}
-                </div>
-                {bridgingState.confirmations !== undefined && (
-                  <div className="mt-2">
-                    <div className="relative pt-1">
-                      <div className="flex mb-2 items-center justify-between">
-                        <div className="text-xs font-semibold inline-block text-blue-600">
-                          Confirmations: {bridgingState.confirmations}/
-                          {BRIDGE_CONFIG.confirmationsRequired}
-                        </div>
-                      </div>
-                      <div className="overflow-hidden h-2 mb-4 text-xs flex rounded bg-blue-200">
-                        <div
-                          style={{
-                            width: `${
-                              (bridgingState.confirmations /
-                                BRIDGE_CONFIG.confirmationsRequired) *
-                              100
-                            }%`,
-                          }}
-                          className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-blue-500"
-                        ></div>
-                      </div>
-                    </div>
+                {bridgingState.txId && (
+                  <div className="text-sm text-gray-600">
+                    Transaction ID: {bridgingState.txId}
                   </div>
                 )}
                 {bridgingState.error && (
-                  <div className="mt-2 text-sm text-red-600">
+                  <div className="text-sm text-red-600">
                     Error: {bridgingState.error}
+                  </div>
+                )}
+                {bridgingState.status === "completed" && (
+                  <div className="text-sm text-green-600">
+                    Successfully bridged {depositAmount} BTC to sBTC!
                   </div>
                 )}
               </div>
@@ -629,6 +846,56 @@ export default function UserProfilePage() {
       </div>
     );
   };
+
+  // Add this function to help with debugging
+  const debugContractCall = async () => {
+    try {
+      // First, check if the contract exists
+      const contractInfoResponse = await fetch(
+        `/api/stx/v2/contracts/interface/${SBTC_CONTRACTS.registry.address}.${SBTC_CONTRACTS.registry.name}`
+      );
+
+      if (!contractInfoResponse.ok) {
+        console.error("Contract not found or not accessible");
+        return;
+      }
+
+      const contractInfo = await contractInfoResponse.json();
+      console.log("Contract interface:", contractInfo);
+
+      // Then try the contract call
+      const response = await getBridgeAddress();
+      console.log("Bridge address retrieved:", response);
+    } catch (error) {
+      console.error("Debug contract call failed:", error);
+    }
+  };
+
+  // Add this to your component's useEffect
+  useEffect(() => {
+    const init = async () => {
+      const isContractDeployed = await verifyContractDeployment();
+      if (!isContractDeployed) {
+        console.error("sBTC registry contract not properly deployed");
+        return;
+      }
+
+      // Debug contract calls in development
+      if (process.env.NODE_ENV === "development") {
+        await debugContractCall();
+      }
+
+      try {
+        const address = await getBridgeAddress();
+        // Use the address as needed
+        console.log("Bridge address:", address);
+      } catch (error) {
+        console.error("Failed to get bridge address:", error);
+      }
+    };
+
+    init();
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
