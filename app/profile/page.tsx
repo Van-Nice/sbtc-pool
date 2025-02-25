@@ -11,11 +11,13 @@ import {
   makeSTXTokenTransfer,
   broadcastTransaction,
   AnchorMode,
+  fetchCallReadOnlyFunction,
+  standardPrincipalCV,
+  makeContractCall,
+  uintCV,
+  bufferCV,
 } from "@stacks/transactions";
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { STACKS_TESTNET } from "@stacks/network";
-// Add StacksNetwork import
-import { StacksMainnet, StacksMocknet } from "@stacks/network";
+import { STACKS_MAINNET, STACKS_TESTNET } from "@stacks/network";
 
 // Use tiny-secp256k1 for browser compatibility
 import * as tinySecp from "@bitcoin-js/tiny-secp256k1-asmjs";
@@ -37,11 +39,60 @@ interface TomlAccount {
 // Network configurations
 const btcNetwork = bitcoin.networks.regtest; // Devnet uses regtest
 
+// Create a custom devnet network configuration
+const devnetNetwork: StacksNetwork = {
+  version: "testnet", // Use testnet version for devnet
+  chainId: 2147483648, // Default chainId for testnet/devnet
+  coreApiUrl: "http://localhost:3999",
+  bnsLookupUrl: "http://localhost:3999",
+  broadcastEndpoint: "/v2/transactions",
+  transferFeeEstimateEndpoint: "/v2/fees/transfer",
+  accountEndpoint: "/v2/accounts",
+  contractAbiEndpoint: "/v2/contracts/interface",
+  readOnlyFunctionCallEndpoint: "/v2/contracts/call-read",
+  isMainnet: () => false,
+};
+
+// Add sBTC contract configuration for devnet
+const SBTC_CONTRACTS = {
+  registry: {
+    address: "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM",
+    name: "sbtc-registry",
+  },
+  token: {
+    address: "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM",
+    name: "sbtc-token",
+  },
+  bridge: {
+    address: "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM",
+    name: "sbtc-bridge",
+  },
+};
+
+// Update bridge configuration
+const BRIDGE_CONFIG = {
+  minDepositAmount: 0.01, // Minimum BTC amount required for bridging
+  confirmationsRequired: 6, // Number of confirmations needed
+  network: STACKS_TESTNET, // Use testnet for development
+  fees: {
+    btcTxFee: 80000, // 80k sats max for UTXO consolidation
+  },
+};
+
 type WalletInfo = {
   btcAddress: string;
   stacksAddress: string;
   btcBalance?: number;
   stxBalance?: number;
+  sBTCBalance?: number; // Add sBTC balance
+};
+
+// Add bridging state types
+type BridgingState = {
+  status: "idle" | "pending" | "confirming" | "completed" | "failed";
+  txId?: string;
+  confirmations?: number;
+  error?: string;
 };
 
 type UserInfo = {
@@ -57,6 +108,9 @@ export default function UserProfilePage() {
   const [copiedField, setCopiedField] = useState<"btc" | "stacks" | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [bridgingState, setBridgingState] = useState<BridgingState>({
+    status: "idle",
+  });
 
   // Function to fetch BTC balance from local devnet
   const fetchBTCBalance = async (address: string) => {
@@ -132,6 +186,24 @@ export default function UserProfilePage() {
     }
   };
 
+  // Function to fetch sBTC balance
+  const fetchSBTCBalance = async (address: string) => {
+    try {
+      // This would be replaced with actual sBTC contract call
+      const response = await fetch(
+        `/api/stx/v2/contracts/${address}/sBTC/get-balance`
+      );
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      return parseInt(data.result.hex) / 100000000; // Convert satoshis to BTC
+    } catch (error) {
+      console.error("Error fetching sBTC balance:", error);
+      return 0;
+    }
+  };
+
   // Function to request STX from faucet
   const requestFromFaucet = async (address: string) => {
     try {
@@ -146,24 +218,22 @@ export default function UserProfilePage() {
 
       const faucetPrivateKey = Buffer.from(stxChild.privateKey).toString("hex");
 
-      // Create network instance for devnet
-      const network = new StacksMocknet();
-      network.coreApiUrl = "http://localhost:3999"; // Point to local devnet
-
       // Create a STX transfer transaction
       const transaction = await makeSTXTokenTransfer({
         recipient: address,
         amount: 100_000_000_000, // 100 STX
         senderKey: faucetPrivateKey,
-        network,
+        network: devnetNetwork,
         memo: "Faucet drip",
         nonce: 0, // Start with nonce 0 for new accounts
         fee: 10000, // 0.01 STX
-        anchorMode: AnchorMode.Any,
       });
 
       // Broadcast the transaction
-      const broadcastResponse = await broadcastTransaction(transaction);
+      const broadcastResponse = await broadcastTransaction({
+        transaction,
+        network: devnetNetwork,
+      });
       console.log("Faucet transfer broadcast:", broadcastResponse);
 
       if ("error" in broadcastResponse) {
@@ -190,6 +260,136 @@ export default function UserProfilePage() {
         error instanceof Error ? error.message : "Failed to request from faucet"
       );
     }
+  };
+
+  // Function to get current bridge address from registry
+  const getBridgeAddress = async () => {
+    try {
+      const response = await fetchCallReadOnlyFunction({
+        contractAddress: SBTC_CONTRACTS.registry.address,
+        contractName: SBTC_CONTRACTS.registry.name,
+        functionName: "get-bitcoin-bridge-address",
+        functionArgs: [],
+        network: BRIDGE_CONFIG.network,
+        senderAddress: SBTC_CONTRACTS.registry.address,
+      });
+
+      // Bridge address is returned as a buffer
+      if (response && response.value) {
+        return response.value.buffer.toString("hex");
+      }
+      throw new Error("No bridge address returned");
+    } catch (error) {
+      console.error("Error fetching bridge address:", error);
+      throw error;
+    }
+  };
+
+  // Function to initiate deposit
+  const initiateDeposit = async (btcAmount: number) => {
+    if (!walletInfo?.stacksAddress) return;
+
+    try {
+      setBridgingState({ status: "pending" });
+
+      // Get current bridge address
+      const bridgeAddress = await getBridgeAddress();
+
+      // Calculate actual amount after fees
+      const satsAmount = btcAmount * 100000000;
+      const netAmount = satsAmount - BRIDGE_CONFIG.fees.btcTxFee;
+
+      if (netAmount <= 0) {
+        throw new Error("Amount too small to cover fees");
+      }
+
+      // Create deposit request
+      const tx = await makeContractCall({
+        contractAddress: SBTC_CONTRACTS.bridge.address,
+        contractName: SBTC_CONTRACTS.bridge.name,
+        functionName: "initiate-deposit",
+        functionArgs: [
+          uintCV(netAmount),
+          bufferCV(Buffer.from(walletInfo.btcAddress)),
+          standardPrincipalCV(walletInfo.stacksAddress),
+        ],
+        network: BRIDGE_CONFIG.network,
+      });
+
+      // Broadcast the transaction
+      const broadcastResponse = await broadcastTransaction(tx);
+
+      if ("error" in broadcastResponse) {
+        throw new Error(`Failed to broadcast: ${broadcastResponse.error}`);
+      }
+
+      setBridgingState({
+        status: "confirming",
+        txId: broadcastResponse.txid,
+        confirmations: 0,
+      });
+
+      // Start monitoring
+      monitorBridgingTransaction(broadcastResponse.txid);
+
+      return {
+        bridgeAddress,
+        txId: broadcastResponse.txid,
+        netAmount,
+        fees: BRIDGE_CONFIG.fees.btcTxFee,
+      };
+    } catch (error) {
+      console.error("Error initiating deposit:", error);
+      setBridgingState({
+        status: "failed",
+        error:
+          error instanceof Error ? error.message : "Failed to initiate deposit",
+      });
+      throw error;
+    }
+  };
+
+  // Function to monitor bridging transaction
+  const monitorBridgingTransaction = async (txId: string) => {
+    const checkConfirmations = async () => {
+      try {
+        const response = await fetch(`/api/btc/tx/${txId}`);
+        const data = await response.json();
+
+        const confirmations = data.confirmations || 0;
+        setBridgingState((prev) => ({
+          ...prev,
+          confirmations,
+          status:
+            confirmations >= BRIDGE_CONFIG.confirmationsRequired
+              ? "completed"
+              : "confirming",
+        }));
+
+        if (confirmations < BRIDGE_CONFIG.confirmationsRequired) {
+          setTimeout(checkConfirmations, 60000); // Check every minute
+        } else {
+          // Update balances after bridging is complete
+          if (walletInfo) {
+            const newSBTCBalance = await fetchSBTCBalance(
+              walletInfo.stacksAddress
+            );
+            setWalletInfo((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    sBTCBalance: newSBTCBalance,
+                  }
+                : null
+            );
+          }
+        }
+      } catch (error) {
+        console.error("Error monitoring transaction:", error);
+      }
+    };
+
+    checkConfirmations();
   };
 
   // Add a button to request STX in the UI
@@ -302,6 +502,132 @@ export default function UserProfilePage() {
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     alert("Settings updated!");
+  };
+
+  // Update BridgingInterface component
+  const BridgingInterface = () => {
+    const [depositAmount, setDepositAmount] = useState<string>("");
+    const [bridgeAddress, setBridgeAddress] = useState<string>("");
+
+    // Fetch bridge address on component mount
+    React.useEffect(() => {
+      getBridgeAddress()
+        .then((address) => setBridgeAddress(address))
+        .catch(console.error);
+    }, []);
+
+    const handleDeposit = async () => {
+      const amount = parseFloat(depositAmount);
+      if (isNaN(amount) || amount < BRIDGE_CONFIG.minDepositAmount) {
+        setFileError(
+          `Minimum deposit amount is ${BRIDGE_CONFIG.minDepositAmount} BTC`
+        );
+        return;
+      }
+
+      try {
+        await initiateDeposit(amount);
+      } catch (error) {
+        setFileError(
+          error instanceof Error ? error.message : "Failed to initiate deposit"
+        );
+      }
+    };
+
+    return (
+      <div className="mt-8 bg-white shadow-lg rounded-lg overflow-hidden">
+        <div className="p-6">
+          <h2 className="text-xl font-semibold text-gray-800 mb-4">
+            Bridge BTC to sBTC
+          </h2>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-gray-500">
+                Bridge Address:
+              </span>
+              <div className="flex items-center">
+                <span className="text-sm text-gray-900 mr-2 font-mono">
+                  {bridgeAddress || "Loading..."}
+                </span>
+                <button
+                  onClick={() =>
+                    bridgeAddress && copyToClipboard(bridgeAddress, "btc")
+                  }
+                  className="text-blue-500 hover:text-blue-600"
+                >
+                  {copiedField === "btc" ? (
+                    <Check size={18} />
+                  ) : (
+                    <Copy size={18} />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700">
+                Deposit Amount (BTC)
+              </label>
+              <input
+                type="number"
+                value={depositAmount}
+                onChange={(e) => setDepositAmount(e.target.value)}
+                min={BRIDGE_CONFIG.minDepositAmount}
+                step="0.001"
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+              />
+            </div>
+
+            <button
+              onClick={handleDeposit}
+              disabled={bridgingState.status !== "idle"}
+              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400"
+            >
+              {bridgingState.status === "idle"
+                ? "Initiate Deposit"
+                : "Processing..."}
+            </button>
+
+            {bridgingState.status !== "idle" && (
+              <div className="mt-4">
+                <div className="text-sm font-medium text-gray-900">
+                  Bridging Status: {bridgingState.status}
+                </div>
+                {bridgingState.confirmations !== undefined && (
+                  <div className="mt-2">
+                    <div className="relative pt-1">
+                      <div className="flex mb-2 items-center justify-between">
+                        <div className="text-xs font-semibold inline-block text-blue-600">
+                          Confirmations: {bridgingState.confirmations}/
+                          {BRIDGE_CONFIG.confirmationsRequired}
+                        </div>
+                      </div>
+                      <div className="overflow-hidden h-2 mb-4 text-xs flex rounded bg-blue-200">
+                        <div
+                          style={{
+                            width: `${
+                              (bridgingState.confirmations /
+                                BRIDGE_CONFIG.confirmationsRequired) *
+                              100
+                            }%`,
+                          }}
+                          className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-blue-500"
+                        ></div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {bridgingState.error && (
+                  <div className="mt-2 text-sm text-red-600">
+                    Error: {bridgingState.error}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -494,6 +820,12 @@ export default function UserProfilePage() {
                 </div>
               </div>
             </div>
+          </>
+        )}
+
+        {isConnected && walletInfo && (
+          <>
+            <BridgingInterface />
           </>
         )}
       </div>
