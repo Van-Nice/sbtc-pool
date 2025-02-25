@@ -6,8 +6,16 @@ import toml from "@iarna/toml";
 import * as bip39 from "bip39";
 import * as bip32 from "bip32";
 import * as bitcoin from "bitcoinjs-lib";
-import { getAddressFromPrivateKey } from "@stacks/transactions";
+import {
+  getAddressFromPrivateKey,
+  makeSTXTokenTransfer,
+  broadcastTransaction,
+  AnchorMode,
+} from "@stacks/transactions";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { STACKS_TESTNET } from "@stacks/network";
+// Add StacksNetwork import
+import { StacksMainnet, StacksMocknet } from "@stacks/network";
 
 // Use tiny-secp256k1 for browser compatibility
 import * as tinySecp from "@bitcoin-js/tiny-secp256k1-asmjs";
@@ -32,6 +40,8 @@ const btcNetwork = bitcoin.networks.regtest; // Devnet uses regtest
 type WalletInfo = {
   btcAddress: string;
   stacksAddress: string;
+  btcBalance?: number;
+  stxBalance?: number;
 };
 
 type UserInfo = {
@@ -46,14 +56,162 @@ export default function UserProfilePage() {
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [copiedField, setCopiedField] = useState<"btc" | "stacks" | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Function to fetch BTC balance from local devnet
+  const fetchBTCBalance = async (address: string) => {
+    try {
+      // Using Bitcoin Core RPC API with devnet credentials
+      const response = await fetch("/api/btc", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Default devnet credentials (base64 encoded devnet:devnet)
+          Authorization: "Basic ZGV2bmV0OmRldm5ldA==",
+        },
+        body: JSON.stringify({
+          jsonrpc: "1.0",
+          id: "btc-balance",
+          method: "getbalance",
+          params: [],
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Bitcoin RPC response:", errorText);
+        throw new Error(`Bitcoin RPC error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+      if (data.error) {
+        console.error("Bitcoin RPC error response:", data.error);
+        throw new Error(`Bitcoin RPC error: ${data.error.message}`);
+      }
+
+      // Result is in BTC
+      return data.result || 0;
+    } catch (error) {
+      console.error("Error fetching BTC balance:", error);
+      // Show more detailed error to user
+      setFileError(
+        `BTC Balance Error: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }. Make sure your Bitcoin Core devnet is running on port 18443.`
+      );
+      return 0;
+    }
+  };
+
+  // Function to fetch STX balance from local devnet
+  const fetchSTXBalance = async (address: string) => {
+    try {
+      // Using Stacks node API directly
+      const response = await fetch(`/api/stx/v2/accounts/${address}`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // Convert hex balance to number
+      const balanceHex = data.balance.replace("0x", "");
+      const balanceInt =
+        balanceHex === "0".repeat(32) ? 0 : parseInt(balanceHex, 16);
+
+      return balanceInt / 1000000; // Convert microSTX to STX
+    } catch (error) {
+      console.error("Error fetching STX balance:", error);
+      setFileError(
+        `STX Balance Error: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
+      return 0;
+    }
+  };
+
+  // Function to request STX from faucet
+  const requestFromFaucet = async (address: string) => {
+    try {
+      const seed = await bip39.mnemonicToSeed(
+        "shadow private easily thought say logic fault paddle word top book during ignore notable orange flight clock image wealth health outside kitten belt reform"
+      );
+      const root = BIP32Factory.fromSeed(seed, btcNetwork);
+      const stxChild = root.derivePath("m/44'/5757'/0'/0/0");
+      if (!stxChild.privateKey) {
+        throw new Error("Failed to derive faucet private key");
+      }
+
+      const faucetPrivateKey = Buffer.from(stxChild.privateKey).toString("hex");
+
+      // Create network instance for devnet
+      const network = new StacksMocknet();
+      network.coreApiUrl = "http://localhost:3999"; // Point to local devnet
+
+      // Create a STX transfer transaction
+      const transaction = await makeSTXTokenTransfer({
+        recipient: address,
+        amount: 100_000_000_000, // 100 STX
+        senderKey: faucetPrivateKey,
+        network,
+        memo: "Faucet drip",
+        nonce: 0, // Start with nonce 0 for new accounts
+        fee: 10000, // 0.01 STX
+        anchorMode: AnchorMode.Any,
+      });
+
+      // Broadcast the transaction
+      const broadcastResponse = await broadcastTransaction(transaction);
+      console.log("Faucet transfer broadcast:", broadcastResponse);
+
+      if ("error" in broadcastResponse) {
+        throw new Error(
+          `Failed to broadcast transaction: ${broadcastResponse.error}`
+        );
+      }
+
+      // Wait a few seconds and refresh the balance
+      setTimeout(async () => {
+        if (walletInfo) {
+          const newBalance = await fetchSTXBalance(walletInfo.stacksAddress);
+          setWalletInfo({
+            ...walletInfo,
+            stxBalance: newBalance,
+          });
+        }
+      }, 3000);
+
+      return broadcastResponse;
+    } catch (error) {
+      console.error("Error requesting from faucet:", error);
+      setFileError(
+        error instanceof Error ? error.message : "Failed to request from faucet"
+      );
+    }
+  };
+
+  // Add a button to request STX in the UI
+  const FaucetButton = () => (
+    <button
+      onClick={() => walletInfo && requestFromFaucet(walletInfo.stacksAddress)}
+      className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-500 hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+    >
+      Request STX from Faucet
+    </button>
+  );
 
   // Handle file upload and sign-in
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    setIsLoading(true);
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const content = e.target?.result as string;
         const parsed = toml.parse(content);
@@ -86,10 +244,17 @@ export default function UserProfilePage() {
           stxPrivateKey,
           "testnet"
         );
-        // Set wallet info
+
+        // After deriving addresses, fetch balances
+        const btcBalance = await fetchBTCBalance(btcAddress);
+        const stxBalance = await fetchSTXBalance(stacksAddress);
+
+        // Set wallet info with balances
         setWalletInfo({
           btcAddress,
           stacksAddress,
+          btcBalance,
+          stxBalance,
         });
 
         // Set user info from TOML file
@@ -101,6 +266,7 @@ export default function UserProfilePage() {
 
         setIsConnected(true);
         setFileError(null);
+        setIsLoading(false);
       } catch (error) {
         setFileError(
           error instanceof Error ? error.message : "Failed to process TOML file"
@@ -108,6 +274,7 @@ export default function UserProfilePage() {
         setIsConnected(false);
         setWalletInfo(null);
         setUserInfo(null);
+        setIsLoading(false);
       }
     };
     reader.readAsText(file);
@@ -233,6 +400,39 @@ export default function UserProfilePage() {
                   <LogOut size={16} className="mr-1" />
                   Disconnect
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isConnected && walletInfo && (
+          <div className="bg-white shadow-lg rounded-lg overflow-hidden">
+            <div className="p-6">
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">
+                Wallet Balances
+              </h2>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-gray-500">
+                    BTC Balance:
+                  </span>
+                  <span className="text-sm text-gray-900">
+                    {isLoading
+                      ? "Loading..."
+                      : `${walletInfo.btcBalance?.toFixed(8) || "0"} BTC`}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-gray-500">
+                    STX Balance:
+                  </span>
+                  <span className="text-sm text-gray-900">
+                    {isLoading
+                      ? "Loading..."
+                      : `${walletInfo.stxBalance?.toFixed(2) || "0"} STX`}
+                  </span>
+                </div>
+                <FaucetButton />
               </div>
             </div>
           </div>

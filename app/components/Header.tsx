@@ -8,8 +8,8 @@ import { Menu, X } from 'lucide-react';
 const navigation = [
   { name: 'Home', href: '/' },
   { name: 'Contribute', href: '/contribute' },
-  { name: 'Distribution', href: '/distribution' },
-  { name: 'History', href: '/history' },
+  { name: 'Distribution', href: '/distribute' },
+  { name: 'History', href: '/contributions' },
   { name: 'Bridging Status', href: '/bridging-status' },
   { name: 'Notifications', href: '/notifications' },
   { name: 'Profile', href: '/profile' },
