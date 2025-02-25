@@ -85,6 +85,8 @@ export class PoolService {
 
   private async sendsBTC(address: string, amount: number): Promise<void> {
     // Implementation of sBTC transfer using the token contract
+    console.log(`Sending ${amount} sBTC to address ${address}`);
+    // TODO: Implement actual sBTC transfer logic
   }
 
   private resetPool(): void {
@@ -113,5 +115,9 @@ export class PoolService {
       console.error("Error processing contribution:", error);
       throw error;
     }
+  }
+
+  async submitContribution(/* address: string, amount: number */) {
+    // Implementation of submitContribution function
   }
 }

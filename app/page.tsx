@@ -3,13 +3,14 @@
 import React, { useState, useEffect } from "react";
 import { Bitcoin, ArrowRight, Clock, RefreshCw } from "lucide-react";
 
+type Contribution = {
+  amount: number;
+  time: string;
+};
+
 export default function Home() {
   const [currentTotal, setCurrentTotal] = useState(0.0075);
-  const [recentContributions] = useState([
-    { amount: 0.001, time: "5 minutes ago" },
-    { amount: 0.0015, time: "10 minutes ago" },
-    { amount: 0.002, time: "15 minutes ago" },
-  ]);
+  const recentContributions = useState<Contribution[]>([])[0];
 
   const threshold = 0.01;
   const progress = (currentTotal / threshold) * 100;
