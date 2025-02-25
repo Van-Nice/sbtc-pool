@@ -1,11 +1,9 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from "next/server";
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { path?: string[] } }
-) {
+export async function GET(request: NextRequest, context: any) {
   try {
-    const path = params.path?.join("/") || "";
+    const path = context.params?.path?.join("/") || "";
     const response = await fetch(`http://localhost:20443/v2/${path}`);
 
     if (!response.ok) {
@@ -23,12 +21,9 @@ export async function GET(
   }
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { path?: string[] } }
-) {
+export async function POST(request: NextRequest, context: any) {
   try {
-    const path = params.path?.join("/") || "";
+    const path = context.params?.path?.join("/") || "";
     const body = await request.json();
 
     const response = await fetch(`http://localhost:3999/v2/${path}`, {

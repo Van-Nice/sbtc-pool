@@ -1,14 +1,14 @@
-"use client"
+"use client";
 
-import React, { useState, useEffect } from 'react';
-import { Bitcoin, ArrowRight, Clock, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect } from "react";
+import { Bitcoin, ArrowRight, Clock, RefreshCw } from "lucide-react";
 
 export default function Home() {
   const [currentTotal, setCurrentTotal] = useState(0.0075);
-  const [recentContributions, setRecentContributions] = useState([
-    { amount: 0.001, time: '5 minutes ago' },
-    { amount: 0.0015, time: '10 minutes ago' },
-    { amount: 0.002, time: '15 minutes ago' },
+  const [recentContributions] = useState([
+    { amount: 0.001, time: "5 minutes ago" },
+    { amount: 0.0015, time: "10 minutes ago" },
+    { amount: 0.002, time: "15 minutes ago" },
   ]);
 
   const threshold = 0.01;
@@ -35,7 +35,9 @@ export default function Home() {
         <div className="bg-white shadow-lg rounded-lg overflow-hidden mb-8">
           <div className="p-6">
             <div className="flex items-center justify-between mb-4">
-              <span className="text-xl font-semibold text-gray-700">Current Total:</span>
+              <span className="text-xl font-semibold text-gray-700">
+                Current Total:
+              </span>
               <div className="flex items-center">
                 <Bitcoin className="text-orange-500 mr-2" />
                 <span className="text-2xl font-bold text-orange-500">
@@ -46,8 +48,12 @@ export default function Home() {
 
             <div className="mb-4">
               <div className="flex justify-between mb-1">
-                <span className="text-sm font-medium text-gray-700">Progress to Bridging Goal</span>
-                <span className="text-sm font-medium text-gray-700">{progress.toFixed(0)}%</span>
+                <span className="text-sm font-medium text-gray-700">
+                  Progress to Bridging Goal
+                </span>
+                <span className="text-sm font-medium text-gray-700">
+                  {progress.toFixed(0)}%
+                </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2.5">
                 <div
@@ -66,24 +72,35 @@ export default function Home() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
           <div className="bg-white shadow-md rounded-lg p-4 hover:shadow-lg transition duration-300">
-            <h2 className="text-lg font-semibold text-gray-800 mb-2">Contribution History</h2>
+            <h2 className="text-lg font-semibold text-gray-800 mb-2">
+              Contribution History
+            </h2>
             <ArrowRight className="text-orange-500" />
           </div>
           <div className="bg-white shadow-md rounded-lg p-4 hover:shadow-lg transition duration-300">
-            <h2 className="text-lg font-semibold text-gray-800 mb-2">Bridging Status</h2>
+            <h2 className="text-lg font-semibold text-gray-800 mb-2">
+              Bridging Status
+            </h2>
             <ArrowRight className="text-orange-500" />
           </div>
         </div>
 
         <div className="bg-white shadow-lg rounded-lg overflow-hidden">
           <div className="p-6">
-            <h2 className="text-xl font-semibold text-gray-800 mb-4">Recent Contributions</h2>
+            <h2 className="text-xl font-semibold text-gray-800 mb-4">
+              Recent Contributions
+            </h2>
             <ul className="divide-y divide-gray-200">
               {recentContributions.map((contribution, index) => (
-                <li key={index} className="py-3 flex justify-between items-center">
+                <li
+                  key={index}
+                  className="py-3 flex justify-between items-center"
+                >
                   <div className="flex items-center">
                     <Bitcoin className="text-orange-500 mr-2" />
-                    <span className="font-medium">{contribution.amount.toFixed(4)} BTC</span>
+                    <span className="font-medium">
+                      {contribution.amount.toFixed(4)} BTC
+                    </span>
                   </div>
                   <div className="flex items-center text-sm text-gray-500">
                     <Clock className="mr-1" size={16} />

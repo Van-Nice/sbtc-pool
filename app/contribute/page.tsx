@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Image from "next/image";
 import {
   QrCode,
   Copy,
@@ -147,7 +148,7 @@ export default function ContributePage() {
           <div className="p-6">
             <div className="flex justify-center mb-6">
               <div className="bg-gray-200 p-4 rounded-lg">
-                <img
+                <Image
                   src={qrCodeUrl}
                   alt="Bridge Address QR Code"
                   width={200}
